@@ -1,8 +1,8 @@
 /*
  * lpd6803.c
  *
- *  Created on: 13 дек. 2014 г.
- *      Author: Алексей
+ *  Created on: 13 Dec 2014 
+ *      Author: Aleksey Kudakov <popsodav@gmail.com>
  */
 #include "ets_sys.h"
 #include "osapi.h"
