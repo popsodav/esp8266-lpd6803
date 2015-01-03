@@ -1,5 +1,8 @@
 /*
  * lpd6803.c
+ *
+ *  Created on: 13 Dec 2014 
+ *      Author: Aleksey Kudakov <popsodav@gmail.com>
  */
 #include "espmissingincludes.h"
 #include "ets_sys.h"
