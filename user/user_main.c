@@ -30,15 +30,7 @@ user_init() {
 	lpd6803_init();
 	lpd6803_show();
 
-	os_timer_disarm(&lpd6803_timer);
-	os_timer_setfn(&lpd6803_timer, (os_timer_func_t *) lpd6803_LedOut, NULL);
-	os_timer_arm_us(&lpd6803_timer, 40, 1);
-
-	os_timer_disarm(&some_timer);
-	os_timer_setfn(&some_timer, (os_timer_func_t *) lpd6803_loop, NULL);
-	os_timer_arm(&some_timer, 200, 1);
-
-	lpd6803_startRunningLine(lpd6803_Color(255, 0, 0));
+	lpd6803_startRainbow();
 
 	//Start os task
 	system_os_task(user_procTask, user_procTaskPrio, user_procTaskQueue,

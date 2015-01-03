@@ -1,30 +1,37 @@
 /*
  * lpd6803.c
- *
- *  Created on: 13 дек. 2014 г.
- *      Author: Алексей
  */
+#include "espmissingincludes.h"
 #include "ets_sys.h"
 #include "osapi.h"
 #include "gpio.h"
 #include "os_type.h"
 #include "lpd6803.h"
 
-uint16_t lpd6803_pixels[numLEDs];
+static uint16_t lpd6803_pixels[numLEDs];
+static uint16_t lpd6803_pixels_r[numLEDs];
+static uint16_t lpd6803_pixels_g[numLEDs];
+static uint16_t lpd6803_pixels_b[numLEDs];
 
-int lpd6803_SendMode;   // Used in interrupt 0=start,1=header,2=data,3=data done
-uint32_t lpd6803_BitCount;   // Used in interrupt
-uint16_t lpd6803_LedIndex;   // Used in interrupt - Which LED we are sending.
-uint32_t lpd6803_BlankCounter;  //Used in interrupt.
+static int lpd6803_SendMode; // Used in interrupt 0=start,1=header,2=data,3=data done
+static uint32_t lpd6803_BitCount;   // Used in interrupt
+static uint16_t lpd6803_LedIndex; // Used in interrupt - Which LED we are sending.
+static uint32_t lpd6803_BlankCounter;  //Used in interrupt.
 
-uint32_t lpd6803_lastdata = 0;
-uint16_t lpd6803_swapAsap = 0; //flag to indicate that the colors need an update asap
-uint8_t lpd6803_mode = 0;
+static uint32_t lpd6803_lastdata = 0;
+static uint16_t lpd6803_swapAsap = 0; //flag to indicate that the colors need an update asap
+static uint8_t lpd6803_mode = 0;
 
 //Running Pixel and Running Line modes variables
-uint16_t lpd6803_mode_rp_CurrentPixel = 0;
-uint16_t lpd6803_mode_rp_PixelColor = 0;
-bool lpd6803_mode_rl_initialPixel = true;
+static uint16_t lpd6803_mode_rp_CurrentPixel = 0;
+static uint16_t lpd6803_mode_rp_PixelColor = 0;
+static bool lpd6803_mode_rl_initialPixel = true;
+
+//Rainbow modes variables
+static uint16_t lpd6803_mode_rainbow_j = 0;
+
+static os_timer_t modeTimer;
+static os_timer_t lpd6803_timer;
 
 void ICACHE_FLASH_ATTR lpd6803_LedOut() {
 	switch (lpd6803_SendMode) {
@@ -36,6 +43,7 @@ void ICACHE_FLASH_ATTR lpd6803_LedOut() {
 				lpd6803_LedIndex = lpd6803_swapAsap;  //set current led
 				lpd6803_SendMode = LPD6803_HEADER;
 				lpd6803_swapAsap = 0;
+				lpd6803_BlankCounter = 0;
 			}
 		}
 		break;
@@ -107,6 +115,10 @@ void ICACHE_FLASH_ATTR lpd6803_setPixelColor(uint16_t n, uint8_t r, uint8_t g,
 	if (n > numLEDs)
 		return;
 
+	lpd6803_pixels_r[n] = r;
+	lpd6803_pixels_g[n] = g;
+	lpd6803_pixels_b[n] = b;
+
 	data = r & 0x1F;
 	data <<= 5;
 	data |= g & 0x1F;
@@ -124,6 +136,36 @@ void ICACHE_FLASH_ATTR lpd6803_setPixelColorByColor(uint16_t n, uint16_t c) {
 	lpd6803_pixels[n] = 0x8000 | c;
 }
 
+void ICACHE_FLASH_ATTR lpd6803_setAllPixelColor(uint8_t r, uint8_t g, uint8_t b) {
+	uint16_t i;
+	for (i = 0; i < numLEDs; i++) {
+		lpd6803_setPixelColor(i, r, g, b);
+	}
+
+}
+
+uint8_t ICACHE_FLASH_ATTR lpd6803_getMode() {
+	return lpd6803_mode;
+}
+
+uint16_t ICACHE_FLASH_ATTR lpd6803_getPixelColorR(uint16_t n) {
+	if (n > numLEDs)
+		return 0;
+	return lpd6803_pixels_r[n];
+}
+
+uint16_t ICACHE_FLASH_ATTR lpd6803_getPixelColorG(uint16_t n) {
+	if (n > numLEDs)
+		return 0;
+	return lpd6803_pixels_g[n];
+}
+
+uint16_t ICACHE_FLASH_ATTR lpd6803_getPixelColorB(uint16_t n) {
+	if (n > numLEDs)
+		return 0;
+	return lpd6803_pixels_b[n];
+}
+
 void ICACHE_FLASH_ATTR lpd6803_init() {
 	gpio_init();
 	//Set GPIO2 to output mode for CLCK
@@ -138,6 +180,10 @@ void ICACHE_FLASH_ATTR lpd6803_init() {
 	for (i = 0; i < numLEDs; i++) {
 		lpd6803_setPixelColor(i, 0, 0, 0);
 	}
+
+	os_timer_disarm(&lpd6803_timer);
+	os_timer_setfn(&lpd6803_timer, (os_timer_func_t *) lpd6803_LedOut, NULL);
+	os_timer_arm_us(&lpd6803_timer, 40, 1);
 }
 
 void ICACHE_FLASH_ATTR lpd6803_show(void) {
@@ -153,7 +199,7 @@ unsigned int ICACHE_FLASH_ATTR lpd6803_Color(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 unsigned int ICACHE_FLASH_ATTR lpd6803_Wheel(uint8_t WheelPos) {
-	uint8_t r, g, b;
+	uint8_t r = 0, g = 0, b = 0;
 	switch (WheelPos >> 5) {
 	case 0:
 		r = 31 - WheelPos % 32;   //Red down
@@ -174,8 +220,6 @@ unsigned int ICACHE_FLASH_ATTR lpd6803_Wheel(uint8_t WheelPos) {
 	return (lpd6803_Color(r, g, b));
 }
 
-//Do nothing function
-
 void ICACHE_FLASH_ATTR lpd6803_loop() {
 	switch (lpd6803_mode) {
 	case (LPD6803_MODE_RUNNING_PIXEL):
@@ -183,6 +227,18 @@ void ICACHE_FLASH_ATTR lpd6803_loop() {
 		break;
 	case (LPD6803_MODE_RUNNING_LINE):
 		lpd6803_RunningLine_loop();
+		break;
+	case (LPD6803_MODE_RAINBOW):
+		lpd6803_Rainbow_loop();
+		break;
+	case (LPD6803_MODE_RAINBOW2):
+		lpd6803_Rainbow2_loop();
+		break;
+	case (LPD6803_MODE_SNOW):
+		lpd6803_Snow_loop();
+		break;
+	case (LPD6803_MODE_RGB):
+		lpd6803_RGB_loop();
 		break;
 	}
 }
@@ -216,6 +272,9 @@ void ICACHE_FLASH_ATTR lpd6803_startRunningLine(uint16_t color) {
 	lpd6803_mode_rp_CurrentPixel = 0;
 	lpd6803_mode_rl_initialPixel = true;
 	lpd6803_mode = LPD6803_MODE_RUNNING_LINE;
+	os_timer_disarm(&modeTimer);
+	os_timer_setfn(&modeTimer, (os_timer_func_t *) lpd6803_loop, NULL);
+	os_timer_arm(&modeTimer, 150, 1);
 }
 
 void ICACHE_FLASH_ATTR lpd6803_RunningPixel_loop() {
@@ -248,4 +307,139 @@ void ICACHE_FLASH_ATTR lpd6803_startRunningPixel(uint16_t color) {
 	lpd6803_mode_rp_PixelColor = color;
 	lpd6803_mode_rp_CurrentPixel = 0;
 	lpd6803_mode = LPD6803_MODE_RUNNING_PIXEL;
+	os_timer_disarm(&modeTimer);
+	os_timer_setfn(&modeTimer, (os_timer_func_t *) lpd6803_loop, NULL);
+	os_timer_arm(&modeTimer, 150, 1);
 }
+
+void ICACHE_FLASH_ATTR lpd6803_Rainbow_loop() {
+	if (lpd6803_mode_rainbow_j < 96 * 5) {
+
+		for (int i = 0; i < numLEDs; i++) {
+			lpd6803_setPixelColorByColor(i,
+					lpd6803_Wheel(
+							(i * 96 / numLEDs + lpd6803_mode_rainbow_j) % 96));
+		}
+		lpd6803_mode_rainbow_j++;
+		lpd6803_show();
+	} else {
+		lpd6803_mode_rainbow_j = 0;
+	}
+}
+
+void ICACHE_FLASH_ATTR lpd6803_startRainbow() {
+	lpd6803_mode_rainbow_j = 0;
+	lpd6803_mode = LPD6803_MODE_RAINBOW;
+	os_timer_disarm(&modeTimer);
+	os_timer_setfn(&modeTimer, (os_timer_func_t *) lpd6803_loop, NULL);
+	os_timer_arm(&modeTimer, 50, 1);
+}
+
+void ICACHE_FLASH_ATTR lpd6803_disableModes() {
+	if (lpd6803_mode != LPD6803_MODE_NONE) {
+		uint16_t i;
+		for (i = 0; i < numLEDs; i++) {
+			lpd6803_setPixelColor(i, 0, 0, 0);
+		}
+		lpd6803_mode = LPD6803_MODE_NONE;
+		lpd6803_show();
+	}
+}
+
+void ICACHE_FLASH_ATTR lpd6803_Rainbow2_loop() {
+	if (lpd6803_mode_rainbow_j < 96 * 5) {
+
+		for (int i = 0; i < numLEDs; i++) {
+			lpd6803_setPixelColorByColor(i,
+					lpd6803_Wheel(
+							(96 / numLEDs + lpd6803_mode_rainbow_j) % 96));
+		}
+		lpd6803_mode_rainbow_j++;
+		lpd6803_show();
+	} else {
+		lpd6803_mode_rainbow_j = 0;
+	}
+}
+
+void ICACHE_FLASH_ATTR lpd6803_startRainbow2() {
+	lpd6803_mode_rainbow_j = 0;
+	lpd6803_mode = LPD6803_MODE_RAINBOW2;
+	os_timer_disarm(&modeTimer);
+	os_timer_setfn(&modeTimer, (os_timer_func_t *) lpd6803_loop, NULL);
+	os_timer_arm(&modeTimer, 50, 1);
+}
+
+void ICACHE_FLASH_ATTR lpd6803_Snow_loop() {
+	int colors[] = { lpd6803_Color(255, 255, 255), lpd6803_Color(66, 170, 250),
+			lpd6803_Color(0, 0, 255) };
+
+	int j = 0;
+
+	for (int i = lpd6803_mode_rainbow_j; i < numLEDs; i++) {
+		lpd6803_setPixelColorByColor(i, colors[j]);
+		j++;
+		if (j > 2) {
+			j = 0;
+		}
+	}
+
+	for (int i = 0; i < lpd6803_mode_rainbow_j; i++) {
+		lpd6803_setPixelColorByColor(i, colors[j]);
+		j++;
+		if (j > 2) {
+			j = 0;
+		}
+	}
+
+	lpd6803_mode_rainbow_j++;
+	if (lpd6803_mode_rainbow_j > numLEDs) {
+		lpd6803_mode_rainbow_j = 0;
+	}
+	lpd6803_show();
+}
+
+void ICACHE_FLASH_ATTR lpd6803_startSnow() {
+	lpd6803_mode_rainbow_j = 0;
+	lpd6803_mode = LPD6803_MODE_SNOW;
+	os_timer_disarm(&modeTimer);
+	os_timer_setfn(&modeTimer, (os_timer_func_t *) lpd6803_loop, NULL);
+	os_timer_arm(&modeTimer, 150, 1);
+}
+
+void ICACHE_FLASH_ATTR lpd6803_RGB_loop() {
+	int colors[] = { lpd6803_Color(255, 0, 0), lpd6803_Color(0, 255, 0),
+			lpd6803_Color(0, 0, 255) };
+
+	int j = 0;
+
+	for (int i = lpd6803_mode_rainbow_j; i < numLEDs; i++) {
+		lpd6803_setPixelColorByColor(i, colors[j]);
+		j++;
+		if (j > 2) {
+			j = 0;
+		}
+	}
+
+	for (int i = 0; i < lpd6803_mode_rainbow_j; i++) {
+		lpd6803_setPixelColorByColor(i, colors[j]);
+		j++;
+		if (j > 2) {
+			j = 0;
+		}
+	}
+
+	lpd6803_mode_rainbow_j++;
+	if (lpd6803_mode_rainbow_j > numLEDs) {
+		lpd6803_mode_rainbow_j = 0;
+	}
+	lpd6803_show();
+}
+
+void ICACHE_FLASH_ATTR lpd6803_startRGB() {
+	lpd6803_mode_rainbow_j = 0;
+	lpd6803_mode = LPD6803_MODE_RGB;
+	os_timer_disarm(&modeTimer);
+	os_timer_setfn(&modeTimer, (os_timer_func_t *) lpd6803_loop, NULL);
+	os_timer_arm(&modeTimer, 150, 1);
+}
+
